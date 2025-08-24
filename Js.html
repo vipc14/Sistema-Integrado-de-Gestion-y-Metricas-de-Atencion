@@ -1,0 +1,928 @@
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+let currentUser = null;
+let currentRole = null;
+let storedStartDate = localStorage.getItem('startDate') || '';
+let storedEndDate = localStorage.getItem('endDate') || '';
+let charts = {};
+
+// --- UTILIDADES Y HELPERS ---
+
+function reformatDate(dateString) {
+  if (!dateString || !dateString.includes('-')) return '';
+  const parts = dateString.split('-');
+  return `${parts[2]}/${parts[1]}/${parts[0]}`;
+}
+
+function showNotification(message, type = 'info', duration = 4000) {
+  const container = document.getElementById('notificationContainer');
+  if (!container) return;
+  const notification = document.createElement('div');
+  notification.className = `notification ${type}`;
+  notification.innerHTML = `<span>${message}</span>`;
+  container.appendChild(notification);
+  setTimeout(() => {
+    notification.style.opacity = '0';
+    setTimeout(() => notification.remove(), 300);
+  }, duration);
+}
+
+function showConfirm(title, message, onConfirm) {
+  const modal = document.getElementById('confirmModal');
+  if(!modal) return;
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalMessage').innerHTML = message;
+  
+  const confirmBtn = document.getElementById('modalConfirm');
+  const cancelBtn = document.getElementById('modalCancel');
+
+  const confirmHandler = () => {
+    modal.classList.remove('active');
+    onConfirm();
+    cleanup();
+  };
+  
+  const cancelHandler = () => {
+    modal.classList.remove('active');
+    cleanup();
+  };
+
+  function cleanup() {
+    confirmBtn.removeEventListener('click', confirmHandler);
+    cancelBtn.removeEventListener('click', cancelHandler);
+  }
+
+  confirmBtn.addEventListener('click', confirmHandler);
+  cancelBtn.addEventListener('click', cancelHandler);
+  
+  modal.classList.add('active');
+}
+
+function crearDashboardCard(title, value, icon = '📊') {
+    return `
+      <div class="dashboard-card">
+        <div class="card-icon">${icon}</div>
+        <div class="card-title">${title}</div>
+        <div class="card-value">${value}</div>
+      </div>`;
+}
+
+function formatearValorIndicador(titulo, valor) {
+  if (typeof valor !== 'number') return valor;
+
+  if (titulo.includes('TPA') || titulo.includes('TPE')) {
+      const minutos = Math.floor(valor / 60);
+      const segundos = Math.round(valor % 60);
+      return `${minutos.toString().padStart(2, '0')}:${segundos.toString().padStart(2, '0')}`;
+  } else if (titulo.includes('TMO')) {
+    return valor.toLocaleString();
+  } else if (titulo.includes('%') || titulo.includes('Nivel de Servicio') || titulo.includes('Tasa de Abandono')) {
+    return valor.toFixed(1) + '%';
+  } else {
+    return valor.toLocaleString();
+  }
+}
+
+// --- NAVEGACIÓN Y VISTAS PRINCIPALES ---
+
+// <<-- FUNCIÓN NUEVA AÑADIDA -->>
+function getActivePage() {
+  const activeLink = document.querySelector('nav a.active');
+  return activeLink ? activeLink.dataset.page : null;
+}
+
+function setActivePage(page) {
+  document.querySelectorAll('nav a').forEach(link => {
+    link.classList.toggle('active', link.dataset.page === page);
+  });
+  
+  Object.values(charts).forEach(chart => chart.destroy());
+  charts = {};
+  
+  const app = document.getElementById('app');
+  app.style.opacity = '0';
+  
+  setTimeout(() => {
+    app.innerHTML = '<div class="loading">Cargando...</div>';
+    app.style.opacity = '1';
+
+    if (page === 'dashboard') renderDashboard();
+    else if (page === 'register') renderRegister();
+    else if (page === 'channels') renderChannels();
+  }, 200);
+}
+
+function showUserManagement() {
+  document.getElementById('mainContent').style.display = 'none';
+  document.getElementById('userManagement').style.display = 'block';
+  loadUsers();
+}
+
+function showMainSystem() {
+  document.getElementById('userManagement').style.display = 'none';
+  document.getElementById('mainContent').style.display = 'block';
+  setActivePage('channels'); 
+}
+
+// --- VISTA: PANEL DE CONTROL ---
+function renderDashboard() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <div class="filters-container">
+      <div class="filters-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+        <div class="filter-group">
+          <label for="semanaSelect">Filtrar por Semana</label>
+          <select id="semanaSelect"><option value="">Seleccione una semana</option></select>
+        </div>
+        <div class="filter-group">
+          <label for="fechaInicio">Fecha Inicio</label>
+          <input type="date" id="fechaInicio">
+        </div>
+        <div class="filter-group">
+          <label for="fechaFin">Fecha Fin</label>
+          <input type="date" id="fechaFin">
+        </div>
+        <div class="filter-group">
+          <label for="canalSelect">Canal</label>
+          <select id="canalSelect">
+            <option value="Presencial">Presencial</option>
+            <option value="Telefonico">Telefónico</option>
+            <option value="Virtual">Virtual</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label for="subcanalSelect">Subcanal</label>
+          <select id="subcanalSelect"><option value="">Todos</option></select>
+        </div>
+      </div>
+    </div>
+    <div id="dashboardCards" class="dashboard-container">
+        <div class="loading">Cargando datos totales...</div>
+    </div>
+    <table class="summary-table" id="summaryTable" style="display:none;">
+      <thead><tr><th>Indicador</th><th>Valor</th></tr></thead>
+      <tbody id="summaryBody"></tbody>
+    </table>`;
+
+  const canalSelect = document.getElementById('canalSelect');
+  const subcanalSelect = document.getElementById('subcanalSelect');
+  const fechaInicioInput = document.getElementById('fechaInicio');
+  const fechaFinInput = document.getElementById('fechaFin');
+  const semanaSelect = document.getElementById('semanaSelect');
+
+  function cargarSemanas() {
+    google.script.run
+      .withSuccessHandler(semanas => {
+        if (semanas && semanas.length > 0) {
+          semanas.forEach(semana => {
+            const option = document.createElement('option');
+            option.value = `${semana.inicio}|${semana.fin}`;
+            option.textContent = `${semana.nombre} (${reformatDate(semana.inicio)} - ${reformatDate(semana.fin)})`;
+            semanaSelect.appendChild(option);
+          });
+        }
+      })
+      .obtenerSemanas();
+  }
+
+  function cargarSubcanales() {
+    subcanalSelect.innerHTML = '<option value="">Cargando...</option>';
+    google.script.run
+      .withSuccessHandler(subcanales => {
+        subcanalSelect.innerHTML = '<option value="">Todos</option>';
+        if (subcanales) {
+          subcanales.forEach(sc => subcanalSelect.innerHTML += `<option value="${sc}">${sc}</option>`);
+        }
+      })
+      .obtenerSubcanales(canalSelect.value);
+  }
+
+  function cargarSuma() {
+    const canal = canalSelect.value;
+    const subcanal = subcanalSelect.value;
+    const fechaInicio = fechaInicioInput.value;
+    const fechaFin = fechaFinInput.value;
+    if (!fechaInicio || !fechaFin) return;
+
+    const dashboardCards = document.getElementById('dashboardCards');
+    const summaryTable = document.getElementById('summaryTable');
+    const summaryBody = document.getElementById('summaryBody');
+    dashboardCards.innerHTML = '<div class="loading">Cargando datos...</div>';
+    summaryTable.style.display = 'none';
+
+    google.script.run
+      .withSuccessHandler(resumen => {
+        dashboardCards.innerHTML = '';
+        
+        const totalAtenciones = canal === 'Telefonico' ? resumen['Llamadas Atendidas'] : resumen['Clientes Atendidos'];
+        if (Object.keys(resumen).length === 0 || totalAtenciones === 0) {
+          dashboardCards.innerHTML = '<div class="no-data"><span class="no-data-icon">📂</span><p>No hay datos para este filtro.</p></div>';
+          summaryTable.style.display = 'table';
+          summaryBody.innerHTML = '<tr><td colspan="2" style="text-align:center;">No se encontraron registros.</td></tr>';
+          return;
+        }
+
+        let nivelServicio = 0;
+        let tasaAbandono = 0;
+
+        if (canal === 'Telefonico') {
+            nivelServicio = resumen['Llamadas Recibidas'] > 0 ? (resumen['Llamadas Atendidas < 20s'] / resumen['Llamadas Recibidas']) * 100 : 0;
+            tasaAbandono = resumen['Llamadas Recibidas'] > 0 ? (resumen['Llamadas Abandonadas'] / resumen['Llamadas Recibidas']) * 100 : 0;
+            dashboardCards.innerHTML += crearDashboardCard('Llamadas Atendidas', resumen['Llamadas Atendidas'].toLocaleString(), '📞');
+        } else {
+            nivelServicio = resumen['Clientes Atendidos'] > 0 ? (resumen['Clientes Atendidos Antes de 15 Min'] / resumen['Clientes Atendidos']) * 100 : 0;
+            tasaAbandono = resumen['Clientes Atendidos'] > 0 ? (resumen['Clientes No Atendidos'] / resumen['Clientes Atendidos']) * 100 : 0;
+            dashboardCards.innerHTML += crearDashboardCard('Clientes Atendidos', resumen['Clientes Atendidos'].toLocaleString(), '👥');
+        }
+        
+        dashboardCards.innerHTML += crearDashboardCard('Nivel de Servicio', `${nivelServicio.toFixed(1)}%`, '⏱️');
+        dashboardCards.innerHTML += crearDashboardCard('Tasa de Abandono', `${tasaAbandono.toFixed(1)}%`, '🚫');
+        dashboardCards.innerHTML += crearDashboardCard('Casos Escalados', resumen['Casos Escalados'].toLocaleString(), '⚠️');
+        
+        summaryTable.style.display = 'table';
+        summaryBody.innerHTML = '';
+        
+        const indicadoresTabla = [];
+        if (canal === 'Telefonico') {
+            indicadoresTabla.push(
+                { nombre: 'Llamadas Recibidas', valor: resumen['Llamadas Recibidas'] },
+                { nombre: 'Llamadas Atendidas', valor: resumen['Llamadas Atendidas'] },
+                { nombre: 'Llamadas Atendidas < 20s', valor: resumen['Llamadas Atendidas < 20s'] },
+                { nombre: 'Llamadas Abandonadas', valor: resumen['Llamadas Abandonadas'] },
+                { nombre: 'TMO (seg)', valor: resumen['TMO (seg)'] },
+                { nombre: '% Nivel de servicio', valor: nivelServicio },
+                { nombre: '% de abandono', valor: tasaAbandono },
+                { nombre: 'Clientes Atendidos', valor: resumen['Clientes Atendidos'] },
+                { nombre: 'Clientes Atendidos Primer Contacto', valor: resumen['Clientes Atendidos Primer Contacto'] },
+                { nombre: 'Casos Escalados', valor: resumen['Casos Escalados'] },
+                { nombre: 'Transacciones Realizadas', valor: resumen['Transacciones Realizadas'] },
+                { nombre: 'Clientes No Atendidos', valor: resumen['Clientes No Atendidos'] }
+            );
+        } else {
+            indicadoresTabla.push(
+                { nombre: 'Clientes Atendidos', valor: resumen['Clientes Atendidos'] },
+                { nombre: 'Clientes Atendidos Primer Contacto', valor: resumen['Clientes Atendidos Primer Contacto'] },
+                { nombre: 'Clientes Atendidos Antes de 15 Min', valor: resumen['Clientes Atendidos Antes de 15 Min'] },
+                { nombre: '% Nivel de servicio', valor: nivelServicio },
+                { nombre: '% de abandono', valor: tasaAbandono },
+                { nombre: 'Casos Escalados', valor: resumen['Casos Escalados'] },
+                { nombre: 'Transacciones Realizadas', valor: resumen['Transacciones Realizadas'] },
+                { nombre: 'Clientes No Atendidos', valor: resumen['Clientes No Atendidos'] },
+                { nombre: 'TPA (seg)', valor: resumen['TPA (seg)'] },
+                { nombre: 'TPE (seg)', valor: resumen['TPE (seg)'] }
+            );
+        }
+        
+        indicadoresTabla.forEach(indicador => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${indicador.nombre}</td><td>${formatearValorIndicador(indicador.nombre, indicador.valor)}</td>`;
+            summaryBody.appendChild(tr);
+        });
+      })
+      .withFailureHandler(err => {
+        dashboardCards.innerHTML = `<div class="error-message">Error: ${err.message}</div>`;
+      })
+      .obtenerSumaPorCanalYFechas(canal, fechaInicio, fechaFin, subcanal);
+  }
+
+  semanaSelect.addEventListener('change', () => {
+    const selectedValue = semanaSelect.value;
+    if (selectedValue) {
+        const [inicio, fin] = selectedValue.split('|');
+        fechaInicioInput.value = inicio;
+        fechaFinInput.value = fin;
+    }
+    cargarSuma();
+  });
+
+  [canalSelect, subcanalSelect, fechaInicioInput, fechaFinInput].forEach(el => el.addEventListener('change', cargarSuma));
+  canalSelect.addEventListener('change', cargarSubcanales);
+
+  google.script.run
+    .withSuccessHandler(rango => {
+      fechaInicioInput.value = rango.fechaInicioTotal;
+      fechaFinInput.value = rango.fechaFinTotal;
+      cargarSuma();
+    })
+    .obtenerRangoTotalFechas();
+  
+  cargarSemanas();
+  cargarSubcanales();
+}
+
+// --- VISTA: INDICADORES POR CANAL ---
+function renderChannels() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <div class="filters-container">
+      <div class="filters-grid">
+        <div class="filter-group">
+            <label for="semanaChannelsSelect">Filtrar por Semanas (Ctrl+Click)</label>
+            <select id="semanaChannelsSelect" multiple style="height: 120px;"></select>
+        </div>
+        <div class="filter-group">
+          <label for="fechaInicioChannels">Fecha Inicio Rango</label>
+          <input type="date" id="fechaInicioChannels" readonly>
+        </div>
+        <div class="filter-group">
+          <label for="fechaFinChannels">Fecha Fin Rango</label>
+          <input type="date" id="fechaFinChannels" readonly>
+        </div>
+      </div>
+    </div>
+    <div class="channels-container" id="channelsContainer"></div>`;
+
+  const channelsContainer = document.getElementById('channelsContainer');
+  const canales = ['Presencial', 'Telefonico', 'Virtual'];
+
+  canales.forEach(canal => {
+    const canalId = canal.toLowerCase();
+    channelsContainer.innerHTML += `
+      <div class="channel-card" id="${canalId}Card">
+        <h2>Canal ${canal}</h2>
+        <h3 style="margin-top: 20px;">Resultados del Rango Seleccionado</h3>
+        <div id="${canalId}Indicators" class="channel-indicators dashboard-container">
+            <div class="loading">Cargando datos...</div>
+        </div>
+        <h3 style="margin-top: 20px;">Evolución de Atenciones (en el rango)</h3>
+        <div style="margin-top:10px; height: 150px; position: relative;">
+          <canvas id="${canalId}Bar"></canvas>
+        </div>
+      </div>`;
+  });
+
+  const fechaInicioInput = document.getElementById('fechaInicioChannels');
+  const fechaFinInput = document.getElementById('fechaFinChannels');
+  const semanaChannelsSelect = document.getElementById('semanaChannelsSelect');
+
+  function cargarDatosCanales() {
+    const fechaInicio = fechaInicioInput.value;
+    const fechaFin = fechaFinInput.value;
+    if (!fechaInicio || !fechaFin) return;
+
+    localStorage.setItem('startDate', fechaInicio);
+    localStorage.setItem('endDate', fechaFin);
+
+    google.script.run
+      .withSuccessHandler(resultados => {
+        resultados.forEach(res => {
+          const canalId = res.canal.toLowerCase();
+          const indicatorsContainer = document.getElementById(`${canalId}Indicators`);
+          indicatorsContainer.innerHTML = '';
+          const resumen = res.resumen;
+
+          const atenciones = res.canal === 'Telefonico' 
+              ? (resumen['Llamadas Atendidas'] || 0) 
+              : (resumen['Clientes Atendidos'] || 0);
+
+          if (Object.keys(resumen).length === 0 || atenciones === 0) {
+              indicatorsContainer.innerHTML = '<div class="no-data"><span class="no-data-icon">📊</span><p>Sin datos.</p></div>';
+          } else {
+              const cardsData = [
+                  { title: 'Atenciones', value: atenciones.toLocaleString(), icon: '👥' },
+                  { title: 'Nivel de Servicio', value: formatearValorIndicador('Nivel de Servicio', resumen['Nivel de Servicio']), icon: '⏱️' },
+                  { title: 'Tasa de Abandono', value: formatearValorIndicador('Tasa de Abandono', resumen['Tasa de Abandono']), icon: '🚫' }
+              ];
+              if (res.canal === 'Telefonico') {
+                  cardsData.push({ title: 'TMO Promedio', value: formatearValorIndicador('TMO Promedio', resumen['TMO Promedio']), icon: '☎️' });
+              } else {
+                  cardsData.push({ title: 'TPA Promedio', value: formatearValorIndicador('TPA Promedio', resumen['TPA Promedio']), icon: '⏳' });
+                  cardsData.push({ title: 'TPE Promedio', value: formatearValorIndicador('TPE Promedio', resumen['TPE Promedio']), icon: '💻' });
+              }
+              cardsData.forEach((card, index) => {
+                  const cardHtml = crearDashboardCard(card.title, card.value, card.icon);
+                  const cardWrapper = document.createElement('div');
+                  cardWrapper.innerHTML = cardHtml;
+                  const cardElement = cardWrapper.firstElementChild;
+                  cardElement.style.animationDelay = `${index * 0.05}s`;
+                  indicatorsContainer.appendChild(cardElement);
+              });
+          }
+
+          const canvas = document.getElementById(`${canalId}Bar`);
+          const ctx = canvas.getContext('2d');
+          const gradient = ctx.createLinearGradient(0, 0, 0, 150);
+          gradient.addColorStop(0, 'rgba(52, 152, 219, 0.8)');
+          gradient.addColorStop(1, 'rgba(52, 152, 219, 0.1)');
+
+          if (charts[canalId]) charts[canalId].destroy();
+          charts[canalId] = new Chart(ctx, {
+            type: 'bar',
+            data: { 
+                labels: res.evolucion.labels, 
+                datasets: [{
+                    label: 'Atenciones', 
+                    data: res.evolucion.data,
+                    backgroundColor: gradient,
+                    borderColor: 'rgba(52, 152, 219, 1)',
+                    borderWidth: 1,
+                    borderRadius: 4
+                }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+          });
+        });
+      })
+      .withFailureHandler(err => showNotification('Error al cargar datos: ' + err.message, 'error'))
+      .obtenerResumenYBarraTodosCanales(fechaInicio, fechaFin);
+  }
+  
+  function manejarSeleccionSemana() {
+      const selectedOptions = Array.from(semanaChannelsSelect.selectedOptions);
+      if (selectedOptions.length === 0) {
+          google.script.run
+            .withSuccessHandler(rango => {
+                fechaInicioInput.value = rango.fechaInicioTotal;
+                fechaFinInput.value = rango.fechaFinTotal;
+                cargarDatosCanales();
+            })
+            .obtenerRangoTotalFechas();
+          return;
+      }
+      let minFechaInicio = '9999-12-31';
+      let maxFechaFin = '1000-01-01';
+      selectedOptions.forEach(option => {
+          const [inicio, fin] = option.value.split('|');
+          if (inicio < minFechaInicio) minFechaInicio = inicio;
+          if (fin > maxFechaFin) maxFechaFin = fin;
+      });
+      fechaInicioInput.value = minFechaInicio;
+      fechaFinInput.value = maxFechaFin;
+      cargarDatosCanales();
+  }
+
+  function cargarSemanasChannels() {
+    google.script.run
+      .withSuccessHandler(semanas => {
+        if (semanas && semanas.length > 0) {
+          semanas.forEach(semana => {
+            const option = document.createElement('option');
+            option.value = `${semana.inicio}|${semana.fin}`;
+            option.textContent = `${semana.nombre} (${reformatDate(semana.inicio)} - ${reformatDate(semana.fin)})`;
+            semanaChannelsSelect.appendChild(option);
+          });
+        }
+      })
+      .obtenerSemanas();
+  }
+  
+  semanaChannelsSelect.addEventListener('change', manejarSeleccionSemana);
+  
+  google.script.run
+    .withSuccessHandler(rango => {
+      fechaInicioInput.value = rango.fechaInicioTotal;
+      fechaFinInput.value = rango.fechaFinTotal;
+      cargarDatosCanales();
+    })
+    .obtenerRangoTotalFechas();
+
+  cargarSemanasChannels();
+}
+
+// --- VISTA: REGISTRO ---
+function renderRegister() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <h1>Registrar Indicadores de Servicio</h1>
+    <div class="tabs-container">
+      <div class="tabs">
+        <button class="tab-button active" data-tab="presencial">✔️ Canal Presencial</button>
+        <button class="tab-button" data-tab="telefonico">📞 Canal Telefónico</button>
+        <button class="tab-button" data-tab="virtual">💻 Canal Virtual</button>
+      </div>
+
+      <div id="presencial" class="tab-content active">
+        <form id="form-presencial" class="registro-form" data-canal="Presencial" novalidate></form>
+      </div>
+      <div id="telefonico" class="tab-content">
+        <form id="form-telefonico" class="registro-form" data-canal="Telefonico" novalidate></form>
+      </div>
+      <div id="virtual" class="tab-content">
+        <form id="form-virtual" class="registro-form" data-canal="Virtual" novalidate></form>
+      </div>
+    </div>`;
+
+  const generarFormularioPresencialVirtual = (canal) => {
+    const C = canal.toLowerCase(); // ej: "presencial"
+    return `
+        <div class="form-grid">
+            <div>
+                <label for="proveedor-${C}">Proveedor/OSAC *</label>
+                <select id="proveedor-${C}" required></select>
+            </div>
+            <div>
+                <label for="semanaRegistroSelect-${C}">Semana de Registro *</label>
+                <select id="semanaRegistroSelect-${C}" required></select>
+                <input type="hidden" id="fecha-${C}" required>
+            </div>
+        </div>
+        <div class="form-grid">
+            <div>
+                <label for="clientesAtendidos-${C}">Clientes Atendidos *</label>
+                <input type="number" id="clientesAtendidos-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="clientesAntes15-${C}">Clientes Atendidos Antes de 15 Min *</label>
+                <input type="number" id="clientesAntes15-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="clientesPrimerContacto-${C}">Clientes Atendidos Primer Contacto *</label>
+                <input type="number" id="clientesPrimerContacto-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="casosEscalados-${C}">Casos Escalados *</label>
+                <input type="number" id="casosEscalados-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="transacciones-${C}">Transacciones Realizadas *</label>
+                <input type="number" id="transacciones-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="clientesNoAtendidos-${C}">Clientes No Atendidos *</label>
+                <input type="number" id="clientesNoAtendidos-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="tpa-${C}">TPA (MM:SS) *</label>
+                <input type="text" id="tpa-${C}" pattern="^[0-9]{1,2}:[0-5][0-9]$" placeholder="MM:SS" required>
+            </div>
+            <div>
+                <label for="tpe-${C}">TPE (MM:SS) *</label>
+                <input type="text" id="tpe-${C}" pattern="^[0-9]{1,2}:[0-5][0-9]$" placeholder="MM:SS" required>
+            </div>
+        </div>
+        <button id="submitButton-${C}" type="submit" class="full-width">Guardar Registro de ${canal}</button>
+    `;
+  };
+
+  const generarFormularioTelefonico = () => {
+    const C = "telefonico";
+    return `
+        <div class="form-grid">
+            <div>
+                <label for="proveedor-${C}">Proveedor/OSAC *</label>
+                <select id="proveedor-${C}" required></select>
+            </div>
+            <div>
+                <label for="semanaRegistroSelect-${C}">Semana de Registro *</label>
+                <select id="semanaRegistroSelect-${C}" required></select>
+                <input type="hidden" id="fecha-${C}" required>
+            </div>
+        </div>
+        <div class="form-grid">
+            <div>
+                <label for="llamadasRecibidas-${C}">Llamadas Recibidas *</label>
+                <input type="number" id="llamadasRecibidas-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="llamadasAtendidas-${C}">Llamadas Atendidas *</label>
+                <input type="number" id="llamadasAtendidas-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="llamadasAtendidas20s-${C}">Llamadas Atendidas antes de 20s *</label>
+                <input type="number" id="llamadasAtendidas20s-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="abandono-${C}">Llamadas Abandonadas *</label>
+                <input type="number" id="abandono-${C}" min="0" required>
+            </div>
+            <div class="full-width">
+                <label for="tmoSeg-${C}">TMO (segundos) *</label>
+                <input type="number" id="tmoSeg-${C}" min="0" required>
+            </div>
+        </div>
+        <hr>
+        <div class="form-grid">
+            <div>
+                <label for="clientesAtendidos-${C}">Clientes Atendidos (del total) *</label>
+                <input type="number" id="clientesAtendidos-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="clientesPrimerContacto-${C}">Clientes Primer Contacto *</label>
+                <input type="number" id="clientesPrimerContacto-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="casosEscalados-${C}">Casos Escalados (FO y Reclamos) *</label>
+                <input type="number" id="casosEscalados-${C}" min="0" required>
+            </div>
+            <div>
+                <label for="transacciones-${C}">Transacciones Realizadas *</label>
+                <input type="number" id="transacciones-${C}" min="0" required>
+            </div>
+            <div class="full-width">
+                <label for="clientesNoAtendidos-${C}">Clientes No Atendidos *</label>
+                <input type="number" id="clientesNoAtendidos-${C}" min="0" required>
+            </div>
+        </div>
+        <button id="submitButton-${C}" type="submit" class="full-width">Guardar Registro de Telefónico</button>
+    `;
+  };
+
+  document.querySelectorAll('.registro-form').forEach(form => {
+    const canal = form.dataset.canal;
+    const C = canal.toLowerCase();
+    form.innerHTML = (canal === 'Telefonico') ? generarFormularioTelefonico() : generarFormularioPresencialVirtual(canal);
+    
+    const semanaSelect = document.getElementById(`semanaRegistroSelect-${C}`);
+    const fechaInput = document.getElementById(`fecha-${C}`);
+    const proveedorSelect = document.getElementById(`proveedor-${C}`);
+    
+    google.script.run.withSuccessHandler(semanas => {
+        semanaSelect.innerHTML = '<option value="">Seleccione una semana</option>';
+        if (semanas) semanas.forEach(s => semanaSelect.innerHTML += `<option value="${s.inicio}">${s.nombre} (${reformatDate(s.inicio)} - ${reformatDate(s.fin)})</option>`);
+    }).obtenerSemanas();
+    
+    google.script.run.withSuccessHandler(subcanales => {
+        proveedorSelect.innerHTML = '<option value="">Seleccione un proveedor</option>';
+        if (subcanales) subcanales.forEach(sc => proveedorSelect.innerHTML += `<option value="${sc}">${sc}</option>`);
+    }).obtenerSubcanales(canal);
+    
+    semanaSelect.addEventListener('change', () => { fechaInput.value = semanaSelect.value; });
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      
+      let esValido = true;
+      form.querySelectorAll('input[required], select[required]').forEach(el => { if (!el.value) esValido = false; });
+      if (!esValido) {
+          showNotification('Por favor, complete todos los campos marcados con *.', 'warning');
+          return;
+      }
+
+      showConfirm('Confirmar Registro', `¿Desea guardar los datos para el canal <strong>${canal}</strong>?`, () => {
+        const submitButton = document.getElementById(`submitButton-${C}`);
+        submitButton.disabled = true;
+        showNotification('Guardando datos...', 'info');
+
+        const onSaveSuccess = (res) => {
+            showNotification(res, 'success');
+            form.reset();
+            google.script.run.withSuccessHandler(semanas => {
+                semanaSelect.innerHTML = '<option value="">Seleccione una semana</option>';
+                if (semanas) semanas.forEach(s => semanaSelect.innerHTML += `<option value="${s.inicio}">${s.nombre} (${reformatDate(s.inicio)} - ${reformatDate(s.fin)})</option>`);
+            }).obtenerSemanas();
+            google.script.run.withSuccessHandler(subcanales => {
+                proveedorSelect.innerHTML = '<option value="">Seleccione un proveedor</option>';
+                if (subcanales) subcanales.forEach(sc => proveedorSelect.innerHTML += `<option value="${sc}">${sc}</option>`);
+            }).obtenerSubcanales(canal);
+            submitButton.disabled = false;
+        };
+        const onSaveFailure = (err) => {
+            showNotification('Error: ' + err.message, 'error');
+            submitButton.disabled = false;
+        };
+
+        if (canal === 'Telefonico') {
+          const datos = [
+            proveedorSelect.value, fechaInput.value,
+            document.getElementById(`llamadasRecibidas-${C}`).value, document.getElementById(`llamadasAtendidas-${C}`).value,
+            document.getElementById(`llamadasAtendidas20s-${C}`).value, document.getElementById(`abandono-${C}`).value,
+            document.getElementById(`tmoSeg-${C}`).value, document.getElementById(`clientesAtendidos-${C}`).value,
+            document.getElementById(`clientesPrimerContacto-${C}`).value, document.getElementById(`casosEscalados-${C}`).value,
+            document.getElementById(`transacciones-${C}`).value, document.getElementById(`clientesNoAtendidos-${C}`).value
+          ];
+          google.script.run.withSuccessHandler(onSaveSuccess).withFailureHandler(onSaveFailure).guardarIndicadoresTelefonico(...datos);
+        } else {
+          const datos = [
+            canal, proveedorSelect.value, fechaInput.value,
+            document.getElementById(`clientesAtendidos-${C}`).value, document.getElementById(`clientesPrimerContacto-${C}`).value,
+            document.getElementById(`clientesAntes15-${C}`).value, document.getElementById(`casosEscalados-${C}`).value,
+            document.getElementById(`transacciones-${C}`).value, document.getElementById(`clientesNoAtendidos-${C}`).value,
+            document.getElementById(`tpa-${C}`).value, document.getElementById(`tpe-${C}`).value
+          ];
+          google.script.run.withSuccessHandler(onSaveSuccess).withFailureHandler(onSaveFailure).guardarIndicadoresPresencialVirtual(...datos);
+        }
+      });
+    });
+  });
+
+  const tabButtons = document.querySelectorAll('.tab-button');
+  const tabContents = document.querySelectorAll('.tab-content');
+  tabButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      tabButtons.forEach(btn => btn.classList.remove('active'));
+      button.classList.add('active');
+      tabContents.forEach(content => content.classList.remove('active'));
+      document.getElementById(button.dataset.tab).classList.add('active');
+    });
+  });
+}
+
+// --- LÓGICA DE USUARIOS Y SESIÓN ---
+function handleLogin(e){ 
+  e.preventDefault(); 
+  const u = document.getElementById('usuario').value; 
+  const p = document.getElementById('contraseña').value; 
+  const err = document.getElementById('loginError'); 
+  err.style.display = 'none'; 
+  google.script.run
+    .withSuccessHandler(r => { 
+      if(r){ 
+        currentUser = r.usuario; 
+        currentRole = r.rol; 
+        document.getElementById('loginContainer').style.display='none'; 
+        document.getElementById('mainContent').style.display='block'; 
+        updateNavigation(); 
+        setActivePage('channels'); 
+      } else { 
+        err.textContent='Usuario o contraseña incorrectos.'; 
+        err.style.display='block'; 
+      } 
+    })
+    .withFailureHandler(e => { 
+      err.textContent = 'Error: '+e.message; 
+      err.style.display='block'; 
+    })
+    .verificarCredenciales(u,p); 
+}
+
+function loadUsers(){ 
+  google.script.run
+    .withSuccessHandler(users => { 
+      const tbody = document.getElementById('userListBody'); 
+      tbody.innerHTML = ''; 
+      if (!users || users.length === 0) { 
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align: center;">No hay usuarios.</td></tr>'; 
+        return; 
+      } 
+      users.forEach(user => { 
+        const tr = document.createElement('tr'); 
+        tr.innerHTML = `<td>${user.usuario}</td><td>${user.rol}</td><td>${user.activo ? 'Activo' : 'Inactivo'}</td><td class="user-actions"><button class="btn-change-password" onclick="showChangePasswordModal('${user.usuario}')">Cambiar Contraseña</button>${user.activo ? `<button class="btn-deactivate" onclick="deactivateUser('${user.usuario}')">Desactivar</button>` : `<button class="btn-edit" onclick="activateUser('${user.usuario}')">Activar</button>`}${user.usuario !== 'admin' ? `<button class="btn-delete" onclick="deleteUser('${user.usuario}')">Eliminar</button>` : ''}</td>`; 
+        tbody.appendChild(tr); 
+      }); 
+    })
+    .withFailureHandler(err => showNotification('Error al cargar usuarios: ' + err.message, 'error'))
+    .obtenerUsuarios(currentUser); 
+}
+
+function createUser(e){ 
+  e.preventDefault(); 
+  const f = document.getElementById('createUserForm'); 
+  const u = f.newUsuario.value; 
+  const p = f.newContraseña.value; 
+  const r = f.newRol.value; 
+  if (!u || !p || !r){ 
+    showNotification('Por favor complete todos los campos.', 'warning'); 
+    return; 
+  } 
+  google.script.run
+    .withSuccessHandler(res => { 
+      showNotification(res, 'success'); 
+      f.reset(); 
+      loadUsers(); 
+    })
+    .withFailureHandler(err => showNotification(err.message, 'error'))
+    .crearUsuario(u, p, r, currentUser); 
+}
+
+function showChangePasswordModal(usuario){ 
+  const isSelf = usuario === currentUser; 
+  const title = isSelf ? 'Cambiar Mi Contraseña' : `Cambiar Contraseña de ${usuario}`; 
+  let message = `${!isSelf && currentRole === 'administrador' ? `<p class="modal-warning">Estás cambiando la contraseña de otro usuario.</p>` : ''}<p>Ingrese la nueva contraseña para <strong>${usuario}</strong>:</p><input type="password" id="newPassPrompt" placeholder="Nueva Contraseña" style="width: 95%; padding: 8px; margin-bottom: 10px;">`; 
+  if (isSelf) { 
+    message += `<p>Confirme su contraseña <strong>actual</strong>:</p><input type="password" id="currentPassPrompt" placeholder="Contraseña Actual" style="width: 95%; padding: 8px;">`; 
+  } 
+  showConfirm(title, message, () => { 
+    const nP = document.getElementById('newPassPrompt').value; 
+    const cPI = document.getElementById('currentPassPrompt'); 
+    const cP = cPI ? cPI.value : ''; 
+    if (!nP){ 
+      showNotification('La nueva contraseña no puede estar vacía.', 'warning'); 
+      return; 
+    } 
+    if (isSelf && !cP){ 
+      showNotification('Debe ingresar su contraseña actual.', 'warning'); 
+      return; 
+    } 
+    google.script.run
+      .withSuccessHandler(res => { 
+        showNotification(res, 'success'); 
+      })
+      .withFailureHandler(err => showNotification(err.message, 'error'))
+      .cambiarContraseña(usuario, cP, nP, currentUser); 
+  }); 
+}
+
+function deactivateUser(usuario){ 
+  showConfirm('Desactivar Usuario', `¿Está seguro que desea desactivar a <strong>${usuario}</strong>?`, () => { 
+    google.script.run
+      .withSuccessHandler(res => { 
+        showNotification(res, 'success'); 
+        loadUsers(); 
+      })
+      .withFailureHandler(err => showNotification(err.message, 'error'))
+      .desactivarUsuario(usuario, currentUser); 
+  }); 
+}
+
+function activateUser(usuario){ 
+  showConfirm('Activar Usuario', `¿Está seguro que desea activar a <strong>${usuario}</strong>?`, () => { 
+    google.script.run
+      .withSuccessHandler(res => { 
+        showNotification(res, 'success'); 
+        loadUsers(); 
+      })
+      .withFailureHandler(err => showNotification(err.message, 'error'))
+      .activarUsuario(usuario, currentUser); 
+  }); 
+}
+
+function deleteUser(usuario){ 
+  showConfirm('Eliminar Usuario', `<p>¿Está seguro que desea eliminar a <strong>${usuario}</strong>?</p><p class="modal-warning">Esta acción no se puede deshacer.</p>`, () => { 
+    google.script.run
+      .withSuccessHandler(res => { 
+        showNotification(res, 'success'); 
+        loadUsers(); 
+      })
+      .withFailureHandler(err => showNotification(err.message, 'error'))
+      .eliminarUsuario(usuario, currentUser); 
+  }); 
+}
+
+function updateNavigation() {
+  const uML = document.getElementById('userManagementLink');
+  const rL = document.getElementById('registerLink');
+  const cacheBtn = document.getElementById('clearCacheBtn');
+
+  if (currentRole === 'administrador') {
+    uML.style.display = 'block';
+    cacheBtn.style.display = 'block';
+  } else {
+    uML.style.display = 'none';
+    cacheBtn.style.display = 'none';
+  }
+
+  if (currentRole === 'usuario') {
+    rL.style.display = 'none';
+  } else {
+    rL.style.display = 'block';
+  }
+}
+
+function cerrarSesion(){ 
+  showConfirm('Cerrar Sesión', '¿Está seguro que desea cerrar sesión?', () => { 
+    currentUser = null; 
+    currentRole = null; 
+    localStorage.removeItem('startDate'); 
+    localStorage.removeItem('endDate'); 
+    document.getElementById('mainContent').style.display = 'none'; 
+    document.getElementById('userManagement').style.display = 'none'; 
+    document.getElementById('loginContainer').style.display = 'block'; 
+    const lF = document.getElementById('loginForm'); 
+    const lE = document.getElementById('loginError'); 
+    if (lF) lF.reset(); 
+    if (lE) lE.style.display = 'none'; 
+  }); 
+}
+
+function toggleTheme(){ 
+  const cT = document.body.getAttribute('data-theme'); 
+  const nT = cT === 'dark' ? 'light' : 'dark'; 
+  document.body.setAttribute('data-theme', nT); 
+  localStorage.setItem('theme', nT); 
+}
+
+document.addEventListener('DOMContentLoaded', () => { 
+  const sT = localStorage.getItem('theme') || 'light'; 
+  document.body.setAttribute('data-theme', sT); 
+  document.getElementById('loginForm').addEventListener('submit', handleLogin); 
+  document.getElementById('createUserForm').addEventListener('submit', createUser); 
+  document.querySelectorAll('nav a').forEach(link => { 
+    link.addEventListener('click', e => { 
+      e.preventDefault(); 
+      const page = link.dataset.page; 
+      if(page === 'userManagement'){ 
+        showUserManagement(); 
+      } else if (page) { 
+        showMainSystem(); 
+        setActivePage(page); 
+      } 
+    }); 
+  }); 
+  document.querySelector('.back-button')?.addEventListener('click', showMainSystem); 
+  document.querySelector('.logout-button')?.addEventListener('click', cerrarSesion); 
+  document.getElementById('themeToggle')?.addEventListener('click', toggleTheme);
+  
+  // <<-- CÓDIGO ACTUALIZADO AQUÍ -->>
+  document.getElementById('clearCacheBtn')?.addEventListener('click', () => {
+    showConfirm('Limpiar Caché', '¿Está seguro que desea limpiar la caché del sistema? Los datos de "Semanas" y "Config" se recargarán desde la hoja de cálculo.', () => {
+      showNotification('Limpiando caché...', 'info');
+      google.script.run
+        .withSuccessHandler(response => {
+          showNotification(response, 'success');
+          
+          // Forzar la recarga de la vista actual para reflejar los cambios de la caché
+          const currentPage = getActivePage();
+          if (currentPage === 'channels') {
+            renderChannels();
+          } else if (currentPage === 'dashboard') {
+            renderDashboard();
+          }
+        })
+        .withFailureHandler(err => {
+          showNotification(err.message, 'error');
+        })
+        .limpiarCacheManualmente(currentUser);
+    });
+  });
+});
+</script>

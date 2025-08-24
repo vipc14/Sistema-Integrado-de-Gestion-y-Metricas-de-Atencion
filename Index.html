@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Sistema de Indicadores - Panel de Control</title>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <?!= include('Css') ?>
+</head>
+<body>
+
+<div id="loginContainer" class="login-container">
+  <div class="login-header">
+    <h1>SIGMA</h1>
+    <h2>Sistema Integrado de Gestión y Métricas de Atención</h2>
+    <p class="login-subtitle">Ingrese sus credenciales para continuar</p>
+  </div>
+  <form id="loginForm" class="login-form" onsubmit="return false;">
+    <div class="form-group">
+      <label for="usuario">
+        <span class="icon">👤</span>
+        Usuario
+      </label>
+      <input type="text" id="usuario" placeholder="Ingrese su usuario" required>
+    </div>
+    <div class="form-group">
+      <label for="contraseña">
+        <span class="icon">🔒</span>
+        Contraseña
+      </label>
+      <input type="password" id="contraseña" placeholder="Ingrese su contraseña" required>
+    </div>
+    <button type="submit" class="login-button">
+      <span class="button-icon">→</span>
+      Ingresar
+    </button>
+  </form>
+  <div id="loginError" class="login-error"></div>
+</div>
+
+<div id="userManagement" class="user-management" style="display: none;">
+  <div class="user-management-header">
+    <h1>Gestión de Usuarios</h1>
+    <button class="back-button" onclick="showMainSystem()">Volver al Sistema</button>
+  </div>
+  
+  <div class="user-management-content">
+    <div class="user-form">
+      <h2>Crear Nuevo Usuario</h2>
+      <form id="createUserForm" onsubmit="return false;">
+        <div class="form-group">
+          <label for="newUsuario">Usuario</label>
+          <div class="input-with-icon">
+            <span class="icon">👤</span>
+            <input type="text" id="newUsuario" placeholder="Ingrese el nombre de usuario" required>
+          </div>
+        </div>
+        
+        <div class="form-group">
+          <label for="newContraseña">Contraseña</label>
+          <div class="input-with-icon">
+            <span class="icon">🔒</span>
+            <input type="password" id="newContraseña" placeholder="Ingrese la contraseña" required>
+          </div>
+        </div>
+        
+        <div class="form-group">
+          <label for="newRol">Rol</label>
+          <select id="newRol" required>
+            <option value="">Seleccione un rol</option>
+            <option value="administrador">Administrador</option>
+            <option value="supervisor">Supervisor</option>
+            <option value="usuario">Usuario</option>
+          </select>
+        </div>
+        
+        <button type="submit" class="create-button">Crear Usuario</button>
+      </form>
+    </div>
+
+    <div class="user-list">
+      <h2>Lista de Usuarios</h2>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Usuario</th>
+              <th>Rol</th>
+              <th>Estado</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="userListBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="mainContent" style="display: none;">
+  <nav>
+    <div class="title">SIGMA</div>
+    <div class="links">
+      <a href="#" data-page="channels" class="active">Indicadores por Canal</a>
+      <a href="#" data-page="dashboard">Panel de Control</a>
+      <a href="#" id="registerLink" data-page="register">Registrar</a>
+      <a href="#" id="userManagementLink" style="display: none;" data-page="userManagement">Gestión de Usuarios</a>
+    </div>
+    <div class="nav-right">
+      <button class="logout-button" id="clearCacheBtn" title="Limpiar Caché del Sistema" style="display: none; background-color: var(--warning-color);">♻️ Limpiar Caché</button>
+      <button class="theme-toggle" id="themeToggle" title="Cambiar Tema">🌓</button>
+      <button class="logout-button" onclick="cerrarSesion()">Cerrar Sesión</button>
+    </div>
+  </nav>
+
+  <div id="app" class="app-container"></div>
+</div>
+
+<div class="notification-container" id="notificationContainer"></div>
+
+<div class="modal-overlay" id="confirmModal">
+  <div class="modal">
+    <div class="modal-title" id="modalTitle"></div>
+    <div class="modal-message" id="modalMessage"></div>
+    <div class="modal-buttons">
+      <button class="modal-button cancel" id="modalCancel">Cancelar</button>
+      <button class="modal-button confirm" id="modalConfirm">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<?!= include('Js') ?>
+</body>
+</html>
